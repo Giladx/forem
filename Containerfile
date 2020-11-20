@@ -11,7 +11,7 @@ RUN curl -sL https://dl.yarnpkg.com/rpm/yarn.repo -o /etc/yum.repos.d/yarn.repo 
     rm -rf /var/cache/yum
 
 ENV BUNDLER_VERSION=2.1.4 BUNDLE_SILENCE_ROOT_WARNING=1
-RUN gem install bundler:"${BUNDLER_VERSION}"
+RUN gem install bundler:"${BUNDLER_VERSION}"  --no-doc
 
 ENV APP_USER=forem APP_UID=1000 APP_GID=1000 APP_HOME=/opt/apps/forem \
     LD_PRELOAD=/usr/lib64/libjemalloc.so.2
@@ -25,11 +25,12 @@ RUN wget https://github.com/jwilder/dockerize/releases/download/"${DOCKERIZE_VER
     && rm dockerize-linux-amd64-"${DOCKERIZE_VERSION}".tar.gz \
     && chown root:root /usr/local/bin/dockerize
 
+USER "${APP_USER}"
 WORKDIR "${APP_HOME}"
 
-COPY ./.ruby-version "${APP_HOME}"/
-COPY ./Gemfile ./Gemfile.lock "${APP_HOME}"/
-COPY ./vendor/cache "${APP_HOME}"/vendor/cache
+COPY --chown="${APP_USER}":"${APP_USER}" ./.ruby-version "${APP_HOME}"/
+COPY --chown="${APP_USER}":"${APP_USER}" ./Gemfile ./Gemfile.lock "${APP_HOME}"/
+COPY --chown="${APP_USER}":"${APP_USER}" ./vendor/ "${APP_HOME}"/vendor/
 
 RUN bundle config build.sassc --disable-march-tune-native && \
     bundle config set deployment 'true' && \
@@ -40,7 +41,7 @@ RUN bundle config build.sassc --disable-march-tune-native && \
 
 RUN mkdir -p "${APP_HOME}"/public/{assets,images,packs,podcasts,uploads}
 
-COPY . "${APP_HOME}"/
+COPY --chown="${APP_USER}":"${APP_USER}" . "${APP_HOME}"/
 
 RUN RAILS_ENV=production NODE_ENV=production bundle exec rake assets:precompile
 
@@ -70,10 +71,10 @@ RUN mkdir -p ${APP_HOME} && chown "${APP_UID}":"${APP_GID}" "${APP_HOME}" && \
     groupadd -g "${APP_GID}" "${APP_USER}" && \
     adduser -u "${APP_UID}" -g "${APP_GID}" -d "${APP_HOME}" "${APP_USER}"
 
-COPY --from=builder --chown="${APP_USER}":"${APP_USER}" ${APP_HOME} ${APP_HOME}
-
 USER "${APP_USER}"
 WORKDIR "${APP_HOME}"
+
+COPY --from=builder --chown="${APP_USER}":"${APP_USER}" ${APP_HOME} ${APP_HOME}
 
 VOLUME "${APP_HOME}"/public/
 
