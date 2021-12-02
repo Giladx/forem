@@ -9,6 +9,8 @@ class Article < ApplicationRecord
   acts_as_taggable_on :tags
   resourcify
 
+  DEFAULT_FEED_PAGINATION_WINDOW_SIZE = 50
+
   attr_accessor :publish_under_org
   attr_writer :series
 
@@ -30,17 +32,21 @@ class Article < ApplicationRecord
   UNIQUE_URL_ERROR = "has already been taken. " \
                      "Email #{ForemInstance.email} for further details.".freeze
 
-  has_one :discussion_lock, dependent: :destroy
+  has_one :discussion_lock, dependent: :delete
 
-  has_many :mentions, as: :mentionable, inverse_of: :mentionable, dependent: :destroy
+  has_many :mentions, as: :mentionable, inverse_of: :mentionable, dependent: :delete_all
   has_many :comments, as: :commentable, inverse_of: :commentable, dependent: :nullify
   has_many :html_variant_successes, dependent: :nullify
   has_many :html_variant_trials, dependent: :nullify
-  has_many :notification_subscriptions, as: :notifiable, inverse_of: :notifiable, dependent: :destroy
+  has_many :notification_subscriptions, as: :notifiable, inverse_of: :notifiable, dependent: :delete_all
   has_many :notifications, as: :notifiable, inverse_of: :notifiable, dependent: :delete_all
-  has_many :page_views, dependent: :destroy
+  has_many :page_views, dependent: :delete_all
+  # `dependent: :destroy` because in Poll we cascade the deletes of
+  #     the poll votes, options, and skips.
   has_many :polls, dependent: :destroy
-  has_many :profile_pins, as: :pinnable, inverse_of: :pinnable, dependent: :destroy
+  has_many :profile_pins, as: :pinnable, inverse_of: :pinnable, dependent: :delete_all
+  # `dependent: :destroy` because in RatingVote we're relying on
+  #     counter_culture to do some additional tallies
   has_many :rating_votes, dependent: :destroy
   has_many :top_comments,
            lambda {
@@ -181,6 +187,11 @@ class Article < ApplicationRecord
   }
   scope :unpublished, -> { where(published: false) }
 
+  # [@jeremyf] For approved articles is there always an assumption of
+  #            published?  Regardless, the scope helps us deal with
+  #            that in the future.
+  scope :approved, -> { where(approved: true) }
+
   scope :admin_published_with, lambda { |tag_name|
     published
       .where(user_id: User.with_role(:super_admin)
@@ -285,6 +296,8 @@ class Article < ApplicationRecord
 
     order(column => dir.to_sym)
   }
+
+  scope :featured, -> { where(featured: true) }
 
   scope :feed, lambda {
                  published.includes(:taggings)
@@ -583,8 +596,7 @@ class Article < ApplicationRecord
   end
 
   def before_destroy_actions
-    bust_cache
-    touch_actor_latest_article_updated_at(destroying: true)
+    bust_cache(destroying: true)
     article_ids = user.article_ids.dup
     if organization
       organization.touch(:last_article_at)
@@ -792,13 +804,13 @@ class Article < ApplicationRecord
     organization&.touch(:latest_article_updated_at)
   end
 
-  def bust_cache
+  def bust_cache(destroying: false)
     cache_bust = EdgeCache::Bust.new
     cache_bust.call(path)
     cache_bust.call("#{path}?i=i")
     cache_bust.call("#{path}?preview=#{password}")
     async_bust
-    touch_actor_latest_article_updated_at
+    touch_actor_latest_article_updated_at(destroying: destroying)
   end
 
   def calculate_base_scores
@@ -807,27 +819,7 @@ class Article < ApplicationRecord
   end
 
   def create_conditional_autovomits
-    return unless Settings::RateLimit.spam_trigger_terms.any? do |term|
-                    Regexp.new(term.downcase).match?(title.downcase)
-                  end
-
-    Reaction.create(
-      user_id: Settings::General.mascot_user_id,
-      reactable_id: id,
-      reactable_type: "Article",
-      category: "vomit",
-    )
-
-    return unless Reaction.article_vomits.where(reactable_id: user.articles.pluck(:id)).size > 2
-
-    user.add_role(:suspended)
-    Note.create(
-      author_id: Settings::General.mascot_user_id,
-      noteable_id: user_id,
-      noteable_type: "User",
-      reason: "automatic_suspend",
-      content: "User suspended for too many spammy articles, triggered by autovomit.",
-    )
+    Spam::Handler.handle_article!(article: self)
   end
 
   def async_bust
